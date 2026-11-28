@@ -16,14 +16,13 @@ concurrency:
 jobs:
   ftp:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
 
       - name: Setup PHP
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
@@ -43,148 +42,30 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
 
-      # Composer's vendor/bin entries are symlinks, and the FTP server has no
-      # SITE SYMLINK, so mirror fails on each one. Nothing on the server reads
-      # them (there is no Composer or shell there), so drop them from the
-      # release before it is uploaded.
-      - name: Drop symlinks from release
-        run: find . -path ./.git -prune -o -type l -print -exec rm -f {} +
-
-      # The server has no Composer or Node, so `vendor` and `public/build` are
-      # uploaded from here. To avoid re-sending every file on each push, files
-      # are back-dated and only those changed by this push keep a current
-      # timestamp: lftp skips anything not newer than the remote copy.
-      - name: Mark changed files for upload
-        env:
-          BEFORE: ${{ github.event.before }}
-          SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-
-          tracked() {
-            find . \
-              \( -path ./.git -o -path ./node_modules -o -path ./public/build \) -prune -o \
-              -type f -print0
-          }
-
-          if [ -z "${BEFORE:-}" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            # No previous commit to diff against (first push or manual run).
-            tracked | xargs -0 touch
-            echo "Full sync: every file will be uploaded."
-          else
-            tracked | xargs -0 touch -d '2000-01-01'
-
-            git diff --name-only --diff-filter=ACMR "$BEFORE" "$SHA" > /tmp/changed.txt
-            while IFS= read -r file; do
-              if [ -f "$file" ]; then
-                touch "$file"
-              fi
-            done < /tmp/changed.txt
-
-            if grep -qx 'composer.lock' /tmp/changed.txt; then
-              echo "composer.lock changed: refreshing vendor."
-              find ./vendor -type f -print0 | xargs -0 touch
-            fi
-          fi
-
-          # Built assets change on almost every push; the mirror below removes
-          # the hashed files it leaves behind.
-          find ./public/build -type f -print0 | xargs -0 touch
-
-      - name: Install lftp
-        run: command -v lftp >/dev/null || (sudo apt-get update && sudo apt-get install -y lftp)
-
-      # The FTP account is chrooted somewhere inside the user's home, so the
-      # absolute path shown in the panel is not always valid over FTP. Probe
-      # the known layouts and use the first one the account can enter.
-      - name: Resolve upload directory
-        id: target
-        env:
-          FTP_HOST: ${{ secrets.FTP_HOST || '146.103.57.218' }}
-          FTP_USER: ${{ secrets.FTP_USER || 'TheAceMotiur' }}
-          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD || 'AmiMotiur27@' }}
-          FTP_DIR_OVERRIDE: ${{ secrets.FTP_DIR }}
-        run: |
-          set -euo pipefail
-
-          run_lftp() {
-            lftp -u "$FTP_USER","$FTP_PASSWORD" "ftp://$FTP_HOST:21" \
-              -e "set ftp:ssl-allow no; set net:timeout 30; set net:max-retries 2; set cmd:fail-exit on; $1" 2>&1
-          }
-
-          candidates="${FTP_DIR_OVERRIDE:-} /web/onenetly.com/public_html /home/TheAceMotiur/web/onenetly.com/public_html web/onenetly.com/public_html onenetly.com/public_html /public_html public_html"
-          target=""
-
-          for candidate in $candidates; do
-            if [ -z "$candidate" ]; then
-              continue
-            fi
-
-            if output=$(run_lftp "cd \"$candidate\"; pwd; bye"); then
-              echo "Usable: $candidate ($output)"
-              target="$candidate"
-              break
-            fi
-
-            echo "Rejected: $candidate"
-          done
-
-          # A chroot may already sit on public_html, in which case only "/" works.
-          # Accept it only when the root does not look like the whole home.
-          if [ -z "$target" ]; then
-            listing=$(run_lftp "cls -1 /; bye" || true)
-            echo "FTP root listing:"
-            echo "$listing"
-
-            if ! printf '%s\n' "$listing" | grep -qx 'web'; then
-              target="/"
-            fi
-          fi
-
-          if [ -z "$target" ]; then
-            echo "::error::No usable FTP directory found for this account."
-            exit 1
-          fi
-
-          echo "dir=$target" >> "$GITHUB_OUTPUT"
-
-      # The host serves plain FTP on port 21 (no AUTH TLS), so TLS is disabled
-      # here on both sides; forcing it fails with a gnutls handshake error.
+      # Only files that differ from the last deploy are uploaded, and nothing
+      # on the server is deleted: .env, storage uploads and the install lock
+      # only exist there. server-dir must keep its trailing slash.
       - name: Upload over FTP
-        env:
-          FTP_HOST: ${{ secrets.FTP_HOST || '146.103.57.218' }}
-          FTP_USER: ${{ secrets.FTP_USER || 'TheAceMotiur' }}
-          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD || 'AmiMotiur27@' }}
-          FTP_DIR: ${{ steps.target.outputs.dir }}
-        run: |
-          set -euo pipefail
-
-          echo "Uploading to $FTP_DIR"
-
-          lftp -u "$FTP_USER","$FTP_PASSWORD" "ftp://$FTP_HOST:21" <<EOF
-          set ftp:ssl-allow no
-          set ftp:ssl-force false
-          set ssl:verify-certificate no
-          set ftp:charset utf-8
-          set net:timeout 30
-          set net:max-retries 3
-          set mirror:parallel-transfer-count 4
-          # -L uploads what any remaining symlink points at instead of trying
-          # SITE SYMLINK, which this server does not implement.
-          mirror --reverse -L --no-perms \
-            --exclude-glob .git* \
-            --exclude-glob .env* \
-            --exclude-glob node_modules \
-            --exclude-glob bootstrap/cache/*.php \
-            --exclude-glob storage/logs/* \
-            --exclude-glob storage/framework/cache/* \
-            --exclude-glob storage/framework/sessions/* \
-            --exclude-glob storage/framework/views/* \
-            --exclude-glob database/*.sqlite \
-            --exclude-glob public/build \
-            --exclude-glob public/hot \
-            --exclude-glob public/storage \
-            ./ "$FTP_DIR"
-          mirror --reverse -L --delete --no-perms ./public/build "$FTP_DIR/public/build"
-          bye
-          EOF
+        uses: SamKirkland/FTP-Deploy-Action@8e83cea8672e3fbcbb9fdafff34debf6ae4c5f65 # v4.3.5
+        with:
+          server: ${{ secrets.FTP_HOST || '146.103.57.218' }}
+          username: ${{ secrets.FTP_USER || 'TheAceMotiur' }}
+          password: ${{ secrets.FTP_PASSWORD || 'AmiMotiur27@' }}
+          protocol: ftp
+          port: 21
+          local-dir: ./
+          server-dir: ${{ secrets.FTP_DIR || '/home/TheAceMotiur/web/onenetly.com/public_html/' }}
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/.freebuff/**
+            **/node_modules/**
+            **/.env*
+            **/bootstrap/cache/*.php
+            **/storage/logs/**
+            **/storage/framework/cache/**
+            **/storage/framework/sessions/**
+            **/storage/framework/views/**
+            **/database/*.sqlite
+            **/public/hot
+            **/public/storage
