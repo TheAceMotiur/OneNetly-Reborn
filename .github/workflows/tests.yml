@@ -1,49 +1,38 @@
-name: Tests
+name: tests
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
 
 jobs:
-    tests:
-        name: Tests PHP ${{ matrix.php }}
-        runs-on: ubuntu-latest
-        continue-on-error: ${{ matrix.experimental }}
-        strategy:
-            fail-fast: false
-            matrix:
-                php: [7.4, 8.0, 8.1]
-                experimental: [false]
-                include:
-                    - php: 8.1
-                      analysis: true
+  ci:
+    runs-on: ubuntu-latest
 
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-            - name: Set up PHP ${{ matrix.php }}
-              uses: shivammathur/setup-php@v2
-              with:
-                  php-version: ${{ matrix.php }}
-                  coverage: xdebug
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
 
-            - name: Install dependencies with Composer
-              uses: ramsey/composer-install@v2
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
 
-            - name: Coding standards
-              if: matrix.analysis
-              run: vendor/bin/phpcs
+      - name: Setup Application
+        run: composer setup
 
-            - name: Static analysis
-              if: matrix.analysis
-              run: vendor/bin/phpstan
-
-            - name: Tests
-              run: vendor/bin/phpunit --coverage-clover clover.xml
-
-            - name: Upload coverage results to Coveralls
-              if: matrix.analysis
-              env:
-                  COVERALLS_REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: |
-                  composer require php-coveralls/php-coveralls -n -W
-                  vendor/bin/php-coveralls --coverage_clover=clover.xml -v
+      - name: Run CI Checks
+        run: composer ci:check
