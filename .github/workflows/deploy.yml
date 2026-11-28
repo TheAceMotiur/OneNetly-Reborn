@@ -43,6 +43,13 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
 
+      # Composer's vendor/bin entries are symlinks, and the FTP server has no
+      # SITE SYMLINK, so mirror fails on each one. Nothing on the server reads
+      # them (there is no Composer or shell there), so drop them from the
+      # release before it is uploaded.
+      - name: Drop symlinks from release
+        run: find . -path ./.git -prune -o -type l -print -exec rm -f {} +
+
       # The server has no Composer or Node, so `vendor` and `public/build` are
       # uploaded from here. To avoid re-sending every file on each push, files
       # are back-dated and only those changed by this push keep a current
@@ -162,7 +169,9 @@ jobs:
           set net:timeout 30
           set net:max-retries 3
           set mirror:parallel-transfer-count 4
-          mirror --reverse --no-perms \
+          # -L uploads what any remaining symlink points at instead of trying
+          # SITE SYMLINK, which this server does not implement.
+          mirror --reverse -L --no-perms \
             --exclude-glob .git* \
             --exclude-glob .env* \
             --exclude-glob node_modules \
@@ -176,6 +185,6 @@ jobs:
             --exclude-glob public/hot \
             --exclude-glob public/storage \
             ./ "$FTP_DIR"
-          mirror --reverse --delete --no-perms ./public/build "$FTP_DIR/public/build"
+          mirror --reverse -L --delete --no-perms ./public/build "$FTP_DIR/public/build"
           bye
           EOF
