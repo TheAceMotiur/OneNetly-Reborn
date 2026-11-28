@@ -87,6 +87,60 @@ jobs:
       - name: Install lftp
         run: command -v lftp >/dev/null || (sudo apt-get update && sudo apt-get install -y lftp)
 
+      # The FTP account is chrooted somewhere inside the user's home, so the
+      # absolute path shown in the panel is not always valid over FTP. Probe
+      # the known layouts and use the first one the account can enter.
+      - name: Resolve upload directory
+        id: target
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST || '146.103.57.218' }}
+          FTP_USER: ${{ secrets.FTP_USER || 'TheAceMotiur' }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD || 'AmiMotiur27@' }}
+          FTP_DIR_OVERRIDE: ${{ secrets.FTP_DIR }}
+        run: |
+          set -euo pipefail
+
+          run_lftp() {
+            lftp -u "$FTP_USER","$FTP_PASSWORD" "ftp://$FTP_HOST:21" \
+              -e "set ftp:ssl-allow no; set net:timeout 30; set net:max-retries 2; set cmd:fail-exit on; $1" 2>&1
+          }
+
+          candidates="${FTP_DIR_OVERRIDE:-} /web/onenetly.com/public_html /home/TheAceMotiur/web/onenetly.com/public_html web/onenetly.com/public_html onenetly.com/public_html /public_html public_html"
+          target=""
+
+          for candidate in $candidates; do
+            if [ -z "$candidate" ]; then
+              continue
+            fi
+
+            if output=$(run_lftp "cd \"$candidate\"; pwd; bye"); then
+              echo "Usable: $candidate ($output)"
+              target="$candidate"
+              break
+            fi
+
+            echo "Rejected: $candidate"
+          done
+
+          # A chroot may already sit on public_html, in which case only "/" works.
+          # Accept it only when the root does not look like the whole home.
+          if [ -z "$target" ]; then
+            listing=$(run_lftp "cls -1 /; bye" || true)
+            echo "FTP root listing:"
+            echo "$listing"
+
+            if ! printf '%s\n' "$listing" | grep -qx 'web'; then
+              target="/"
+            fi
+          fi
+
+          if [ -z "$target" ]; then
+            echo "::error::No usable FTP directory found for this account."
+            exit 1
+          fi
+
+          echo "dir=$target" >> "$GITHUB_OUTPUT"
+
       # The host serves plain FTP on port 21 (no AUTH TLS), so TLS is disabled
       # here on both sides; forcing it fails with a gnutls handshake error.
       - name: Upload over FTP
@@ -94,9 +148,11 @@ jobs:
           FTP_HOST: ${{ secrets.FTP_HOST || '146.103.57.218' }}
           FTP_USER: ${{ secrets.FTP_USER || 'TheAceMotiur' }}
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD || 'AmiMotiur27@' }}
-          FTP_DIR: ${{ secrets.FTP_DIR || '/web/onenetly.com/public_html' }}
+          FTP_DIR: ${{ steps.target.outputs.dir }}
         run: |
           set -euo pipefail
+
+          echo "Uploading to $FTP_DIR"
 
           lftp -u "$FTP_USER","$FTP_PASSWORD" "ftp://$FTP_HOST:21" <<EOF
           set ftp:ssl-allow no
