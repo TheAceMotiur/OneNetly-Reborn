@@ -76,7 +76,10 @@ final class Installer
 
     public function mode(): string
     {
-        return $this->hasApplicationKey() ? self::MODE_UPDATE : self::MODE_INSTALL;
+        // The lock file is written by the last install step, so it is the only
+        // reliable "installed" record. An install that stopped after the app
+        // key was generated must stay in install mode so the wizard can finish.
+        return $this->isLocked() ? self::MODE_UPDATE : self::MODE_INSTALL;
     }
 
     /**
@@ -202,8 +205,8 @@ final class Installer
         $this->log("step {$step} (mode {$mode})");
 
         if ($mode === self::MODE_INSTALL) {
-            if ($this->hasApplicationKey()) {
-                throw new RuntimeException('This application already has an APP_KEY, so it is already installed. Reload the page to use update mode.');
+            if ($this->isLocked()) {
+                throw new RuntimeException('This application is already installed. Reload the page to use update mode.');
             }
 
             return $this->installStep($step, $input);
@@ -545,6 +548,11 @@ final class Installer
      */
     private function installKey(): array
     {
+        // Resuming an interrupted install must not rotate an existing key.
+        if ($this->hasApplicationKey()) {
+            return ['message' => 'Application key already set.', 'output' => 'APP_KEY is present in .env.'];
+        }
+
         $output = $this->runArtisan('key:generate', ['--force' => true]);
 
         if (! $this->hasApplicationKey()) {

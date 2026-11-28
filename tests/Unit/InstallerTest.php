@@ -20,14 +20,37 @@ it('detects a fresh install when there is no app key', function (): void {
         ->and($installer->hasApplicationKey())->toBeFalse();
 });
 
-it('detects update mode once an app key exists', function (): void {
+it('stays in install mode when the key was written but the install did not finish', function (): void {
     (new EnvFile($this->basePath.'/.env'))->set(['APP_KEY' => 'base64:'.str_repeat('a', 44)]);
+
+    $installer = new Installer($this->basePath);
+
+    expect($installer->mode())->toBe(Installer::MODE_INSTALL)
+        ->and($installer->status()['installed'])->toBeFalse()
+        ->and($installer->status()['steps'])->toHaveCount(8);
+});
+
+it('detects update mode once the install lock exists', function (): void {
+    (new EnvFile($this->basePath.'/.env'))->set(['APP_KEY' => 'base64:'.str_repeat('a', 44)]);
+    mkdir($this->basePath.'/storage/app', 0777, true);
+    file_put_contents($this->basePath.'/storage/app/install.lock', '{}');
 
     $installer = new Installer($this->basePath);
 
     expect($installer->mode())->toBe(Installer::MODE_UPDATE)
         ->and($installer->status()['mode'])->toBe(Installer::MODE_UPDATE)
         ->and($installer->status()['steps'])->toHaveCount(10);
+});
+
+it('keeps the existing app key when an install is resumed', function (): void {
+    $key = 'base64:'.str_repeat('c', 44);
+    (new EnvFile($this->basePath.'/.env'))->set(['APP_KEY' => $key]);
+
+    $installer = new Installer($this->basePath);
+    $result = $installer->run(Installer::MODE_INSTALL, 'key');
+
+    expect($installer->env()->get('APP_KEY'))->toBe($key)
+        ->and($result['message'])->toContain('already');
 });
 
 it('keeps every other .env line intact when writing values', function (): void {
